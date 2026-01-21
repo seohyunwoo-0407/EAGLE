@@ -72,7 +72,7 @@ def build_dataset_rank(
         for i in range(len(examples['id'])):
             messages = [
                 {"role": "system",
-                 "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+                    "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
             ]
             convroles = ["user", "assistant"]
             roles = {"human": "user", "gpt": "assistant"}
@@ -90,65 +90,22 @@ def build_dataset_rank(
                 messages.append(
                     {"role": role, "content": sentence["value"]}
                 )
-            conversation = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-
             if not tokenizer.pad_token_id:
                 tokenizer.pad_token_id = tokenizer.unk_token_id
-
-            input_ids = tokenizer(
-                conversation,
+            
+            encoded = tokenizer.apply_chat_template(
+                messages, 
+                tokenizer=True,
+                add_generation_prompt=False,
+                return_assistant_tokens_mask=True,
                 return_tensors="pt",
-                add_special_tokens=False,
-            ).input_ids[0]
-            # filtering out the samples which is longer than max_len
-            if len(input_ids) > train_config["max_len"]:
+            )
+            input_ids = encoded["input_ids"][0]
+
+            if len(input_ids) > self.train_config.max_len:
                 continue
-            loss_mask = torch.ones_like(input_ids)
-            # print(i)
-
-            sep = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-
-            total_len = len(input_ids)
-
-            sep2 = "<|eot_id|><|start_header_id|>user<|end_header_id|>"
-            turns = conversation.split(sep2)
-
-            turns[1] = turns[0] + sep2 + turns[1]
-            turns = turns[1:]
-
-            cur_len = 1
-            loss_mask[:cur_len] = 0
-            for i, turn in enumerate(turns):
-                if turn == "":
-                    break
-                turn_len = len(tokenizer(turn).input_ids)
-
-                parts = turn.split(sep)
-                if len(parts) != 2:
-                    break
-                parts[0] += sep
-                # "-2" is hardcoded for the Llama tokenizer to make the offset correct.
-                instruction_len = len(tokenizer(parts[0]).input_ids) - 1
-
-                # Ignore the user instructions
-                if i == 0:
-                    loss_mask[cur_len: cur_len + instruction_len - 2] = 0
-                else:
-                    loss_mask[cur_len - 3: cur_len + instruction_len + 1] = 0
-                cur_len += turn_len
-                if i != 0:
-                    cur_len += 3
-                # cur_len+=2
-
-                # if i != 0 and not tokenizer.legacy:
-                #     # The legacy and non-legacy modes handle special tokens differently
-                #     cur_len -= 1
-
-            loss_mask[cur_len:] = 0
+            
+            loss_mask = encoded["assistant_tokens_mask"][0].to(dtype=torch.long)
             attention_mask = torch.ones_like(loss_mask)
 
             # new_examples["conversation"].append(conversation)
@@ -157,6 +114,7 @@ def build_dataset_rank(
             new_examples["attention_mask"].append(attention_mask[None, :])
 
         return new_examples
+
 
     ds1 = ds1.map(
         preprocess_function,
@@ -226,8 +184,12 @@ world_size = deepspeed.comm.get_world_size()
 if global_rank == 0:
     import wandb
 
-    wandb.login(key="")
-    wandb.init(project="l382", entity="yuhui-li", config=ds_config)
+    wandb.login(key="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")
+    wandb.init(
+        project="granite_Eagle_Pretraining", 
+        entity="shw4166-korea-advanced-institute-of-science-and-technology", 
+        config=ds_config
+    )
 
 os.makedirs(args.savedir, exist_ok=True)
 
@@ -347,5 +309,4 @@ for epoch in range(start_epoch, num_epochs):
     torch.cuda.empty_cache()
 
     model_engine.save_16bit_model(f"{args.savedir}/state_{epoch}", exclude_frozen_parameters=True)
-    if epoch % 10 == 0:
-        deepspeed.DeepSpeedEngine.save_checkpoint(model_engine, save_dir=f"{args.savedir}/state_{epoch}")
+    deepspeed.DeepSpeedEngine.save_checkpoint(model_engine, save_dir=f"{args.savedir}/state_{epoch}")
