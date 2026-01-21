@@ -92,15 +92,15 @@ class EConfig(PretrainedConfig):
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```"""
-    model_type = "granitemoe"
+    model_type = "llama"
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
         self,
         vocab_size=49155,
         hidden_size=1024,
-        intermediate_size=512,
-        num_hidden_layers=24,
+        intermediate_size=4096,
+        num_hidden_layers=1,
         num_attention_heads=16,
         num_key_value_heads=8,
         hidden_act="silu",
