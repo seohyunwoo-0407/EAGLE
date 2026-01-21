@@ -28,8 +28,8 @@ from torch import nn
 import os
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 from transformers.activations import ACT2FN
-from transformers import AutoTokenizer
-from modeling_llama_kv import LlamaForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, GraniteMoeForCausalLM
+from modeling_llama_kv import LlamaForCausalLM 
 from configs import EConfig
 from safetensors import safe_open
 from datasets import load_dataset
@@ -382,6 +382,7 @@ class LlamaDecoderLayeremb(nn.Module):
         # if self.index!=0:
 
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.residual_multiplier = config.residual_multiplier
 
     def forward(
             self,
@@ -429,14 +430,14 @@ class LlamaDecoderLayeremb(nn.Module):
             output_attentions=output_attentions,
             use_cache=use_cache,
         )
-        hidden_states = residual + hidden_states
+        hidden_states = residual + hidden_states * self.residual_multiplier
 
 
         residual = hidden_states
 
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states = residual + hidden_states * self.residual_multiplier
 
         outputs = (hidden_states, return_hidden)
 
@@ -480,6 +481,7 @@ def merge_dicts(dicts):
 class Model(nn.Module):
     def __init__(self, config, ds_config, training_config, load_head=False, load_emb=True, path=None):
         super().__init__() 
+        self.config = config
         # self.layers = nn.ModuleList(
         #     [LlamaDecoderLayer(config, index=index) for index in range(config.num_hidden_layers)])
         self.train_config = training_config
@@ -496,7 +498,7 @@ class Model(nn.Module):
         self.draft_vocab_size = config.draft_vocab_size
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.length = 7
-        self.target_model = LlamaForCausalLM.from_pretrained(path, torch_dtype=torch.float16)
+        self.target_model = GraniteMoeForCausalLM.from_pretrained(path, torch_dtype=torch.float16)
         self.target_model.eval()
         self.fc=nn.Linear(self.hidden_size*3, self.hidden_size, bias=False)
         for param in self.target_model.parameters():
@@ -592,46 +594,39 @@ class Model(nn.Module):
                         continue
                     loss_mask = torch.ones_like(input_ids)
                     # print(i)
-
-                    sep = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-
-                    total_len = len(input_ids)
-
-                    sep2 = "<|eot_id|><|start_header_id|>user<|end_header_id|>"
-                    turns = conversation.split(sep2)
-
-                    turns[1] = turns[0] + sep2 + turns[1]
-                    turns = turns[1:]
-
-                    cur_len = 1
+                    
+                    prefix_messages = [messages[0]]
+                    prefix_text = tokenizer.apply_chat_template(
+                        prefix_messages,
+                        tokenize=False,
+                        add_generation_prompt=False,
+                    )
+                    cur_len = len(
+                        tokenizer(
+                            prefix_text,
+                            return_tensors="pt",
+                            add_special_tokens=False,
+                        ).input_ids[0]
+                    )
                     loss_mask[:cur_len] = 0
-                    for i, turn in enumerate(turns):
-                        if turn == "":
-                            break
-                        turn_len = len(tokenizer(turn).input_ids)
 
-                        parts = turn.split(sep)
-                        if len(parts) != 2:
-                            break
-                        parts[0] += sep
-                        # "-2" is hardcoded for the Llama tokenizer to make the offset correct.
-                        instruction_len = len(tokenizer(parts[0]).input_ids) - 1
-
-                        # Ignore the user instructions
-                        if i == 0:
-                            loss_mask[cur_len: cur_len + instruction_len - 2] = 0
-                        else:
-                            loss_mask[cur_len - 3: cur_len + instruction_len + 1] = 0
-                        cur_len += turn_len
-                        if i != 0:
-                            cur_len += 3
-                        # cur_len+=2
-
-                        # if i != 0 and not tokenizer.legacy:
-                        #     # The legacy and non-legacy modes handle special tokens differently
-                        #     cur_len -= 1
-
-                    loss_mask[cur_len:] = 0
+                    for message in messages[1:]:
+                        prefix_messages.append(message)
+                        prefix_text = tokenizer.apply_chat_template(
+                            prefix_messages,
+                            tokenize=False,
+                            add_generation_prompt=False,
+                        )
+                        next_len = len(
+                            tokenizer(
+                                prefix_text,
+                                return_tensors="pt",
+                                add_special_tokens=False,
+                            ).input_ids[0]
+                        )
+                        if message["role"] == "user":
+                            loss_mask[cur_len: cur_len + next_len] = 0
+                        cur_len = next_len 
 
                     # new_examples["conversation"].append(conversation)
                     new_examples["input_ids"].append(input_ids[None, :])
@@ -715,8 +710,8 @@ class Model(nn.Module):
         device = input_ids.device
         outs = self.target_model(input_ids=input_ids, attention_mask=attention_mask)
         hidden_states0 = outs.hidden_states[0]
-        hidden_states1 = outs.hidden_states[1]
-        hidden_states2 = outs.hidden_states[2]
+        hidden_states1 = outs.hidden_states[12]
+        hidden_states2 = outs.hidden_states[23]
         hidden_states=torch.cat((hidden_states0,hidden_states1,hidden_states2),dim=-1)
         # hidden_states=torch.cat((hidden_states0,hidden_states1),dim=-1)
         target = outs.logits
@@ -862,13 +857,11 @@ class Model(nn.Module):
                 input_ids = padding(input_ids, left=False)
                 target = padding(target, left=False)
                 loss_mask = padding(loss_mask, left=False)
-                ind=torch.arange(seq_length,device=attention_mask.device)
-                ind0=ind[idx:]
-                ind1=ind[:seq_length-idx]
-                attention_mask[:,:,ind0,ind1]=torch.finfo(attention_mask.dtype).min
 
 
 
         return plosses, vlosses, acces
+
+
 
 
