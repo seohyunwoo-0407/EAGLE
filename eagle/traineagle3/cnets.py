@@ -192,6 +192,7 @@ class LlamaAttention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
+        self.attention_multiplier = config.attention_multiplier
 
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
@@ -277,7 +278,7 @@ class LlamaAttention(nn.Module):
         k0 = cache_k[0]
         v0 = cache_v[0]
 
-        attn_weights = torch.matmul(query_states, k0.transpose(2, 3)) / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(query_states, k0.transpose(2, 3)) / math.sqrt(self.head_dim) * self.attention_multiplier
         lck = len(cache_k)
 
 
@@ -289,7 +290,8 @@ class LlamaAttention(nn.Module):
             qi = query_states
             kiq = ki
 
-            attn_weightsi = (qi * kiq).sum(-1) / math.sqrt(self.head_dim)
+            attn_weightsi = (qi * kiq).sum(-1) / math.sqrt(self.head_dim) * self.attention_multiplier
+
             attn_weights = torch.cat((attn_weights, attn_weightsi[..., None]), dim=-1)
 
         # upcast attention to fp32
@@ -498,7 +500,16 @@ class Model(nn.Module):
         self.draft_vocab_size = config.draft_vocab_size
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.length = 7
-        self.target_model = GraniteMoeForCausalLM.from_pretrained(path, torch_dtype=torch.float16)
+        self.embedding_multiplier = config.embedding_multiplier
+        self.logits_scaling = config.logits_scaling
+
+
+        base_config = AutoConfig.from_pretrained(path)
+        if base_config.model_type == "granitemoe" or base_config.model_type == "granite":
+            self.target_model = GraniteMoeForCausalLM.from_pretrained(path, torch_dtype=torch.float16)
+        else:
+            raise ValueError(f"Unsupported model type: {base_config.model_type}")
+
         self.target_model.eval()
         self.fc=nn.Linear(self.hidden_size*3, self.hidden_size, bias=False)
         for param in self.target_model.parameters():
@@ -573,60 +584,23 @@ class Model(nn.Module):
                         messages.append(
                             {"role": role, "content": sentence["value"]}
                         )
-                    conversation = tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=False,
-                        add_generation_prompt=False,
-                    )
-
+                    
                     if not tokenizer.pad_token_id:
                         tokenizer.pad_token_id = tokenizer.unk_token_id
-
-                    input_ids = tokenizer(
-                        conversation,
+                    
+                    encoded = tokenizer.apply_chat_template(
+                        messages, 
+                        tokenizer=True,
+                        add_generation_prompt=False,
+                        return_assistant_tokens_mask=True,
                         return_tensors="pt",
-                        add_special_tokens=False,
-                    ).input_ids[0]
-                    # When construct draft model vocab, 
-                    # filter out samples which is longer than max_len,
-                    # instead of truncating them.
+                    )
+                    input_ids = encoded["input_ids"][0]
+
                     if len(input_ids) > self.train_config.max_len:
                         continue
-                    loss_mask = torch.ones_like(input_ids)
-                    # print(i)
-                    
-                    prefix_messages = [messages[0]]
-                    prefix_text = tokenizer.apply_chat_template(
-                        prefix_messages,
-                        tokenize=False,
-                        add_generation_prompt=False,
-                    )
-                    cur_len = len(
-                        tokenizer(
-                            prefix_text,
-                            return_tensors="pt",
-                            add_special_tokens=False,
-                        ).input_ids[0]
-                    )
-                    loss_mask[:cur_len] = 0
+                    loss_mask = encoded["assistant_tokens_mask"][0].to(dtype=torch.long)
 
-                    for message in messages[1:]:
-                        prefix_messages.append(message)
-                        prefix_text = tokenizer.apply_chat_template(
-                            prefix_messages,
-                            tokenize=False,
-                            add_generation_prompt=False,
-                        )
-                        next_len = len(
-                            tokenizer(
-                                prefix_text,
-                                return_tensors="pt",
-                                add_special_tokens=False,
-                            ).input_ids[0]
-                        )
-                        if message["role"] == "user":
-                            loss_mask[cur_len: cur_len + next_len] = 0
-                        cur_len = next_len 
 
                     # new_examples["conversation"].append(conversation)
                     new_examples["input_ids"].append(input_ids[None, :])
@@ -787,7 +761,7 @@ class Model(nn.Module):
             inputs_embeds = self.embed_tokens(input_ids)
             if self.training and self.gradient_checkpointing and not inputs_embeds.requires_grad:
                 inputs_embeds.requires_grad = True
-            inputs_embeds = inputs_embeds.to(hidden_states.dtype)
+            inputs_embeds = inputs_embeds.to(hidden_states.dtype) * self.embedding_multiplier
 
             if self.gradient_checkpointing and self.training:
 
@@ -843,7 +817,7 @@ class Model(nn.Module):
 
             hidden_states_out = self.norm(hidden_states_out)
 
-            logits = self.lm_head(hidden_states_out)
+            logits = self.lm_head(hidden_states_out) / self.logits_scaling
             logits = logits.float()
             out_logp = nn.LogSoftmax(dim=2)(logits)
             plogp = target_p * out_logp
