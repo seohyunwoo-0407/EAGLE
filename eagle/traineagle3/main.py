@@ -19,8 +19,8 @@ with open(deepspeed_config) as f:
     ds_config = json.load(f)
 train_config = {
     "bs": ds_config["train_micro_batch_size_per_gpu"],
-    "num_epochs": 40,
-    "num_workers": 2,
+    "num_epochs": 20,
+    "num_workers": 4,
     "max_len": 2048,
     "config_path": "config.json",
     "gradient_checkpointing": False
@@ -90,22 +90,41 @@ def build_dataset_rank(
                 messages.append(
                     {"role": role, "content": sentence["value"]}
                 )
+
+            conversation = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+
             if not tokenizer.pad_token_id:
                 tokenizer.pad_token_id = tokenizer.unk_token_id
             
+            input_ids = tokenizer(
+                conversation,
+                return_tensors="pt",
+                max_length=2048,
+                add_special_tokens=False,
+                truncation=True,
+            ).input_ids[0]
+            loss_mask = torch.ones_like(input_ids)
+            """
             encoded = tokenizer.apply_chat_template(
                 messages, 
                 tokenizer=True,
                 add_generation_prompt=False,
                 return_assistant_tokens_mask=True,
                 return_tensors="pt",
+                return_dict=True,
             )
             input_ids = encoded["input_ids"][0]
 
-            if len(input_ids) > self.train_config.max_len:
+            if len(input_ids) > train_config["max_len"]:
                 continue
 
             loss_mask = encoded["assistant_tokens_mask"][0].to(dtype=torch.long)
+            """
+
             attention_mask = torch.ones_like(loss_mask)
 
             # new_examples["conversation"].append(conversation)
