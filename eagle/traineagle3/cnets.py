@@ -28,7 +28,7 @@ from torch import nn
 import os
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 from transformers.activations import ACT2FN
-from transformers import AutoTokenizer, AutoModelForCausalLM, GraniteMoeForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, GraniteMoeForCausalLM, AutoConfig
 from modeling_llama_kv import LlamaForCausalLM 
 from configs import EConfig
 from safetensors import safe_open
@@ -192,7 +192,7 @@ class LlamaAttention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
-        self.attention_multiplier = config.attention_multiplier
+        self.attention_multiplier = self.config.attention_multiplier
 
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
@@ -493,7 +493,7 @@ class Model(nn.Module):
         else:
             dschf = None
         self.midlayer = LlamaDecoderLayeremb(config)
-        self.gradient_checkpointing = self.train_config.gradient_checkpointing
+        self.gradient_checkpointing = self.train_config["gradient_checkpointing"]
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.hidden_size = config.hidden_size
@@ -533,12 +533,17 @@ class Model(nn.Module):
                     tensor_slice = f.get_slice("model.embed_tokens.weight")
                     vocab_size, hidden_dim = tensor_slice.get_shape()
                     tensor = tensor_slice[:, :hidden_dim].float()
-            except:
-                with open(os.path.join(path, "pytorch_model.bin.index.json"), "r") as f:
-                    index_json = json.loads(f.read())
-                    emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
-                weights = torch.load(os.path.join(path, emb_path))
-                tensor = weights["model.embed_tokens.weight"].float()
+            except (FileNotFoundError, KeyError):
+                try:
+                    safetensors_path = os.path.join(path, "model.safetensors")
+                    if os.path.exists(safetensors_path):
+                        with safe_open(safetensors_path, framework="pt", device="cpu") as f:
+                            tensor_slice = f.get_slice("model.embed_tokens.weight")
+                            vocab_size, hidden_dim = tensor_slice.get_shape()
+                            tensor = tensor_slice[:, :hidden_dim].float()
+                except (FileNotFoundError, KeyError):
+                    tensor = None
+            
             self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx, _weight=tensor)
 
         self.lm_head = nn.Linear(config.hidden_size, config.draft_vocab_size, bias=False)
@@ -584,14 +589,32 @@ class Model(nn.Module):
                         messages.append(
                             {"role": role, "content": sentence["value"]}
                         )
-                    
+
+                    conversation = tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=False,
+                    )
+
                     if not tokenizer.pad_token_id:
                         tokenizer.pad_token_id = tokenizer.unk_token_id
-                    
+   
+                    input_ids = tokenizer(
+                        conversation,
+                        return_tensors="pt",
+                        max_length=2048,
+                        add_special_tokens=False,
+                        truncation=True,
+                    ).input_ids[0]
+
+                    loss_mask = torch.ones_like(input_ids)  
+
+                    """
                     encoded = tokenizer.apply_chat_template(
                         messages, 
                         tokenizer=True,
                         add_generation_prompt=False,
+                        return_dict=True,
                         return_assistant_tokens_mask=True,
                         return_tensors="pt",
                     )
@@ -601,7 +624,7 @@ class Model(nn.Module):
                         continue
                     loss_mask = encoded["assistant_tokens_mask"][0].to(dtype=torch.long)
 
-
+                    """
                     # new_examples["conversation"].append(conversation)
                     new_examples["input_ids"].append(input_ids[None, :])
                     new_examples["loss_mask"].append(loss_mask[None, :])
