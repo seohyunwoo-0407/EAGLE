@@ -23,7 +23,7 @@ train_config = {
     "num_workers": 2,
     "max_len": 2048,
     "config_path": "config.json",
-    "gradient_checkpoint": True
+    "gradient_checkpointing": False
 }
 
 from safetensors import safe_open
@@ -104,7 +104,7 @@ def build_dataset_rank(
 
             if len(input_ids) > self.train_config.max_len:
                 continue
-            
+
             loss_mask = encoded["assistant_tokens_mask"][0].to(dtype=torch.long)
             attention_mask = torch.ones_like(loss_mask)
 
