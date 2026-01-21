@@ -506,7 +506,7 @@ class Model(nn.Module):
 
         base_config = AutoConfig.from_pretrained(path)
         if base_config.model_type == "granitemoe" or base_config.model_type == "granite":
-            self.target_model = GraniteMoeForCausalLM.from_pretrained(path, torch_dtype=torch.float16)
+            self.target_model = GraniteMoeForCausalLM.from_pretrained(path, torch_dtype=torch.float16, output_hidden_states=True)
         else:
             raise ValueError(f"Unsupported model type: {base_config.model_type}")
 
@@ -682,7 +682,7 @@ class Model(nn.Module):
     @torch.no_grad()
     def dataprepare(self, input_ids, attention_mask, loss_mask):
         device = input_ids.device
-        outs = self.target_model(input_ids=input_ids, attention_mask=attention_mask)
+        outs = self.target_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
         hidden_states0 = outs.hidden_states[0]
         hidden_states1 = outs.hidden_states[12]
         hidden_states2 = outs.hidden_states[23]
