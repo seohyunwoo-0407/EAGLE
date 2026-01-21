@@ -56,6 +56,27 @@ class EConfig(PretrainedConfig):
             these scaling strategies behave:
             https://www.reddit.com/r/LocalLLaMA/comments/14mrgpr/dynamically_scaled_rope_further_increases/. This is an
             experimental feature, subject to breaking API changes in future versions.
+        draft_vocab_size (`int`, *optional*, defaults to 32000):
+            Vocabulary size of the draft model for EAGLE training.
+        rope_theta (`float`, *optional*, defaults to 10000.0):
+            The base period for RoPE embeddings. For Granite models, this is typically 1500000.0.
+        # Granite MoE specific parameters
+        num_local_experts (`int`, *optional*, defaults to None):
+            Number of local experts in MoE model. For Granite, this is typically 32.
+        num_experts_per_tok (`int`, *optional*, defaults to None):
+            Number of experts per token in MoE model. For Granite, this is typically 8.
+        router_aux_loss_coef (`float`, *optional*, defaults to 0.0):
+            Coefficient for router auxiliary loss in MoE models.
+        output_router_logits (`bool`, *optional*, defaults to False):
+            Whether to output router logits in MoE models.
+        attention_multiplier (`float`, *optional*, defaults to 1.0):
+            Multiplier for attention scaling. For Granite, this is typically 0.015625.
+        embedding_multiplier (`float`, *optional*, defaults to 1.0):
+            Multiplier for embedding scaling. For Granite, this is typically 12.0.
+        residual_multiplier (`float`, *optional*, defaults to 1.0):
+            Multiplier for residual connections. For Granite, this is typically 0.22.
+        logits_scaling (`float`, *optional*, defaults to 1.0):
+            Scaling factor for logits. For Granite, this is typically 6.0.
 
         Example:
 
@@ -71,28 +92,40 @@ class EConfig(PretrainedConfig):
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```"""
-    model_type = "llama"
+    model_type = "granitemoe"
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
         self,
-        vocab_size=32000,
-        hidden_size=4096,
-        intermediate_size=11008,
-        num_hidden_layers=32,
-        num_attention_heads=32,
-        num_key_value_heads=None,
+        vocab_size=49155,
+        hidden_size=1024,
+        intermediate_size=512,
+        num_hidden_layers=24,
+        num_attention_heads=16,
+        num_key_value_heads=8,
         hidden_act="silu",
-        max_position_embeddings=2048,
+        max_position_embeddings=131072,
         initializer_range=0.02,
         rms_norm_eps=1e-6,
         use_cache=True,
-        pad_token_id=None,
-        bos_token_id=1,
-        eos_token_id=2,
-        pretraining_tp=1,
-        tie_word_embeddings=False,
-        rope_scaling=None,
+        pad_token_id=0,
+        bos_token_id=0,
+        eos_token_id=0,
+        tie_word_embeddings=true,
+        rope_scaling=null,
+        draft_vocab_size=32000,
+        rope_theta=1500000.0,
+        # Granite MoE specific parameters
+        num_local_experts=32,
+        num_experts_per_tok=8,
+        router_aux_loss_coef=0.0,
+        output_router_logits=False,
+        attention_multiplier=0.015625,
+        attention_dropout=0.0,
+        attention_bias=false,
+        embedding_multiplier=12.0,
+        residual_multiplier=0.22,
+        logits_scaling=6.0,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -113,6 +146,21 @@ class EConfig(PretrainedConfig):
         self.pretraining_tp = pretraining_tp
         self.use_cache = use_cache
         self.rope_scaling = rope_scaling
+        self.rope_theta = rope_theta
+        self.draft_vocab_size = draft_vocab_size
+        
+        # Granite MoE specific parameters
+        self.num_local_experts = num_local_experts
+        self.num_experts_per_tok = num_experts_per_tok
+        self.router_aux_loss_coef = router_aux_loss_coef
+        self.output_router_logits = output_router_logits
+        self.attention_multiplier = attention_multiplier
+        self.attention_dropout = attention_dropout
+        self.attention_bias = attention_bias
+        self.embedding_multiplier = embedding_multiplier
+        self.residual_multiplier = residual_multiplier
+        self.logits_scaling = logits_scaling
+        
         self._rope_scaling_validation()
 
         super().__init__(
