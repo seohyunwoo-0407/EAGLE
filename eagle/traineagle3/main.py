@@ -70,10 +70,7 @@ def build_dataset_rank(
             "loss_mask": []
         }
         for i in range(len(examples['id'])):
-            messages = [
-                {"role": "system",
-                    "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
-            ]
+            messages = []
             convroles = ["user", "assistant"]
             roles = {"human": "user", "gpt": "assistant"}
             source = examples['conversations'][i]
@@ -103,7 +100,7 @@ def build_dataset_rank(
             input_ids = tokenizer(
                 conversation,
                 return_tensors="pt",
-                max_length=2048,
+                max_length=4096,
                 add_special_tokens=False,
                 truncation=True,
             ).input_ids[0]
@@ -133,7 +130,6 @@ def build_dataset_rank(
             new_examples["attention_mask"].append(attention_mask[None, :])
 
         return new_examples
-
 
     ds1 = ds1.map(
         preprocess_function,
