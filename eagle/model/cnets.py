@@ -31,6 +31,7 @@ from transformers.activations import ACT2FN
 from huggingface_hub import hf_hub_download
 
 
+
 try:
     from .configs import EConfig
     from .utils_c import *
@@ -200,7 +201,8 @@ class LlamaAttention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
-
+        self.attention_multifilier = config.attention_multiplier #modified-shw
+        
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
@@ -292,7 +294,7 @@ class LlamaAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim) * self.attention_multifilier #modified-shw
 
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(
@@ -396,6 +398,7 @@ class LlamaDecoderLayeremb(nn.Module):
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         # if self.index!=0:
 
+        self.residual_multiplier = config.residual_multiplier #modified-shw
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -441,13 +444,13 @@ class LlamaDecoderLayeremb(nn.Module):
             output_attentions=output_attentions,
             use_cache=use_cache,
         )
-        hidden_states = residual + hidden_states
+        hidden_states = residual + hidden_states * self.residual_multiplier #modified-shw
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states = residual + hidden_states * self.residual_multiplier #modified-shw
 
         outputs = (hidden_states,)
 
@@ -488,35 +491,119 @@ class Model(nn.Module):
         if load_emb and not hasattr(config, "target_hidden_size"):
             from safetensors import safe_open
             import json
-            try:
-                index_json_path = os.path.join(path, "model.safetensors.index.json")
-                if not os.path.exists(index_json_path):
-                    index_json_path = hf_hub_download(path, "model.safetensors.index.json")
-                with open(index_json_path, "r") as f:
-                    index_json = json.loads(f.read())
-                    emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
-                local_emb_path = os.path.join(path, emb_path)
-                if not os.path.exists(local_emb_path):
-                    local_emb_path = hf_hub_download(path, emb_path)
-                with safe_open(local_emb_path,
-                               framework="pt",
-                               device="cpu") as f:
-                    tensor_slice = f.get_slice("model.embed_tokens.weight")
-                    vocab_size, hidden_dim = tensor_slice.get_shape()
-                    tensor = tensor_slice[:, :hidden_dim].float()
-            except:
-                index_json_path = os.path.join(path, "pytorch_model.bin.index.json")
-                if not os.path.exists(index_json_path):
-                    index_json_path = hf_hub_download(path, "pytorch_model.bin.index.json")
-                with open(index_json_path, "r") as f:
-                    index_json = json.loads(f.read())
-                    emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
-                local_emb_path = os.path.join(path, emb_path)
-                if not os.path.exists(local_emb_path):
-                    local_emb_path = hf_hub_download(path, emb_path)
-                weights = torch.load(local_emb_path)
-                tensor = weights["model.embed_tokens.weight"].float()
-            self.embed_tokens.weight.data = tensor
+            from huggingface_hub.errors import EntryNotFoundError
+            tensor = None
+            
+            # Check if path is a local directory or Hugging Face model ID
+            is_local_path = os.path.exists(path) and os.path.isdir(path)
+            
+            # Try 1: Sharded safetensors (with local index file)
+            if tensor is None:
+                try:
+                    index_json_path = os.path.join(path, "model.safetensors.index.json")
+                    if os.path.exists(index_json_path):
+                        with open(index_json_path, "r") as f:
+                            index_json = json.loads(f.read())
+                            emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
+                        local_emb_path = os.path.join(path, emb_path)
+                        if os.path.exists(local_emb_path):
+                            with safe_open(local_emb_path, framework="pt", device="cpu") as f:
+                                tensor_slice = f.get_slice("model.embed_tokens.weight")
+                                vocab_size, hidden_dim = tensor_slice.get_shape()
+                                tensor = tensor_slice[:, :hidden_dim].float()
+                    elif not is_local_path:
+                        # Try downloading from Hugging Face
+                        try:
+                            index_json_path = hf_hub_download(path, "model.safetensors.index.json")
+                            with open(index_json_path, "r") as f:
+                                index_json = json.loads(f.read())
+                                emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
+                            local_emb_path = hf_hub_download(path, emb_path)
+                            with safe_open(local_emb_path, framework="pt", device="cpu") as f:
+                                tensor_slice = f.get_slice("model.embed_tokens.weight")
+                                vocab_size, hidden_dim = tensor_slice.get_shape()
+                                tensor = tensor_slice[:, :hidden_dim].float()
+                        except EntryNotFoundError:
+                            tensor = None
+                except Exception:
+                    tensor = None
+            
+            # Try 2: Single safetensors file
+            if tensor is None:
+                try:
+                    safetensors_path = os.path.join(path, "model.safetensors")
+                    if os.path.exists(safetensors_path):
+                        with safe_open(safetensors_path, framework="pt", device="cpu") as f:
+                            tensor_slice = f.get_slice("model.embed_tokens.weight")
+                            vocab_size, hidden_dim = tensor_slice.get_shape()
+                            tensor = tensor_slice[:, :hidden_dim].float()
+                    elif not is_local_path:
+                        # Try downloading from Hugging Face
+                        try:
+                            safetensors_path = hf_hub_download(path, "model.safetensors")
+                            with safe_open(safetensors_path, framework="pt", device="cpu") as f:
+                                tensor_slice = f.get_slice("model.embed_tokens.weight")
+                                vocab_size, hidden_dim = tensor_slice.get_shape()
+                                tensor = tensor_slice[:, :hidden_dim].float()
+                        except EntryNotFoundError:
+                            tensor = None
+                except Exception:
+                    tensor = None
+            
+            # Try 3: Sharded pytorch_model.bin (with local index file)
+            if tensor is None:
+                try:
+                    index_json_path = os.path.join(path, "pytorch_model.bin.index.json")
+                    if os.path.exists(index_json_path):
+                        with open(index_json_path, "r") as f:
+                            index_json = json.loads(f.read())
+                            emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
+                        local_emb_path = os.path.join(path, emb_path)
+                        if os.path.exists(local_emb_path):
+                            weights = torch.load(local_emb_path, map_location="cpu")
+                            tensor = weights["model.embed_tokens.weight"].float()
+                    elif not is_local_path:
+                        # Try downloading from Hugging Face
+                        try:
+                            index_json_path = hf_hub_download(path, "pytorch_model.bin.index.json")
+                            with open(index_json_path, "r") as f:
+                                index_json = json.loads(f.read())
+                                emb_path = index_json["weight_map"]["model.embed_tokens.weight"]
+                            local_emb_path = hf_hub_download(path, emb_path)
+                            weights = torch.load(local_emb_path, map_location="cpu")
+                            tensor = weights["model.embed_tokens.weight"].float()
+                        except EntryNotFoundError:
+                            tensor = None
+                except Exception:
+                    tensor = None
+            
+            # Try 4: Single pytorch_model.bin file
+            if tensor is None:
+                try:
+                    pytorch_path = os.path.join(path, "pytorch_model.bin")
+                    if os.path.exists(pytorch_path):
+                        weights = torch.load(pytorch_path, map_location="cpu")
+                        tensor = weights["model.embed_tokens.weight"].float()
+                    elif not is_local_path:
+                        # Try downloading from Hugging Face
+                        try:
+                            pytorch_path = hf_hub_download(path, "pytorch_model.bin")
+                            weights = torch.load(pytorch_path, map_location="cpu")
+                            tensor = weights["model.embed_tokens.weight"].float()
+                        except EntryNotFoundError:
+                            tensor = None
+                except Exception:
+                    tensor = None
+            
+            if tensor is not None:
+                self.embed_tokens.weight.data = tensor
+            else:
+                raise FileNotFoundError(
+                    f"Could not find model embedding weights in path: {path}\n"
+                    f"Tried: model.safetensors.index.json, model.safetensors, "
+                    f"pytorch_model.bin.index.json, pytorch_model.bin\n"
+                    f"Please check if the model path is correct and the model files exist."
+                )
 
         self.top_k = top_k
         self.total_tokens = total_tokens - 1
@@ -534,7 +621,8 @@ class Model(nn.Module):
             self.fc = nn.Linear(config.hidden_size * 3, self.hidden_size, bias=False)
         self.norm=LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.logsoftmax = nn.LogSoftmax(dim=-1)
-
+        self.embedding_multiplier = config.embedding_multiplier #modified-shw
+        self.logits_scaling = config.logits_scaling #modified-shw
         d2t=torch.zeros((config.draft_vocab_size),dtype=torch.long)
         t2d=torch.zeros((config.vocab_size),dtype=torch.bool)
         self.register_buffer("d2t", d2t)
@@ -602,7 +690,7 @@ class Model(nn.Module):
         past_key_values_length = 0
 
         with torch.no_grad():
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.embed_tokens(input_ids) * self.embedding_multiplier #modified-shw
             # inputs_embeds = inputs_embeds.detach()
 
         # if std is not None:
@@ -697,7 +785,7 @@ class Model(nn.Module):
         last_hidden = out_hidden[:, -1]
 
         # last_headout = head(last_hidden)
-        last_headout = self.lm_head(self.norm(last_hidden))
+        last_headout = self.lm_head(self.norm(last_hidden)) / self.logits_scaling #modified-shw
 
         last_p = self.logsoftmax(last_headout)
         top = torch.topk(last_p, top_k, dim=-1)
@@ -731,7 +819,7 @@ class Model(nn.Module):
             parents = (topk_cs_index + bias)
             parents_list.append(parents)
 
-            last_headout = self.lm_head(self.norm(out_hidden[0]))
+            last_headout = self.lm_head(self.norm(out_hidden[0])) / self.logits_scaling #modified-shw
             last_p = self.logsoftmax(last_headout)
 
             top = torch.topk(last_p, top_k, dim=-1)
