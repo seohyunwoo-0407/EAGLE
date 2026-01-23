@@ -13,6 +13,7 @@ from .modeling_llama_kv import LlamaForCausalLM as KVLlamaForCausalLM
 from .modeling_mixtral_kv import MixtralForCausalLM as KVMixtralForCausalLM
 #from .modeling_qwen2_kv import LlamaForCausalLM as KVQwen2ForCausalLM
 from .modeling_qwen2_kv import Qwen2ForCausalLM as KVQwen2ForCausalLM
+from .modeling_granite_kv import GraniteMoeForCausalLM as KVGraniteMoeForCausalLM #modified-shw
 from .utils import *
 from .kv_cache import initialize_past_key_values
 
@@ -107,10 +108,17 @@ class EaModel(nn.Module):
             base_model = KVQwen2ForCausalLM.from_pretrained(
                 base_model_path, **kwargs
             )
-        else:
-            base_model = KVMixtralForCausalLM.from_pretrained(
+        elif Type == 'Qwen3ForCausalLM':
+            base_model = KVQwen3ForCausalLM.from_pretrained(
                 base_model_path, **kwargs
             )
+        elif Type == 'GraniteMoeForCausalLM':
+            base_model = KVGraniteMoeForCausalLM.from_pretrained(
+                base_model_path, **kwargs
+            )
+        else:
+            raise ValueError(f"Unsupported model type: {Type}")
+        # modified-shw
 
         configpath = os.path.join(ea_model_path, "config.json")
         if not os.path.exists(configpath):
@@ -243,6 +251,7 @@ class EaModel(nn.Module):
         )
         new_token = 0
         max_length = max_length - self.ea_layer.total_tokens - 10
+        accept_lengths = []
         for idx in range(max_length):
             # with Timer("all"):
             self.base_model.model.tree_mask = tree_mask
@@ -265,6 +274,8 @@ class EaModel(nn.Module):
             best_candidate, accept_length, sample_p = evaluate_posterior(
                 logits, candidates, logits_processor
             )
+            print(f"Step {idx} accept_length: {accept_length}")
+            accept_lengths.append(accept_length)
             # print(accept_length)
             # Adjusting the input sequence, draft model forward
             input_ids, draft_tokens, retrieve_indices, tree_mask, tree_position_ids, new_token, hidden_state, sample_token = update_inference_inputs(
@@ -293,9 +304,19 @@ class EaModel(nn.Module):
             if input_ids.shape[1] > max_length:
                 break
         if not log:
-            return input_ids
+            import numpy as np
+            # Convert tensors to CPU and extract scalar values if needed
+            accept_lengths_cpu = [x.item() if isinstance(x, torch.Tensor) else x for x in accept_lengths]
+            avg_accept_length = np.mean(accept_lengths_cpu) if accept_lengths_cpu else 0.0
+            print(f"Average accept length: {avg_accept_length:.2f} (total steps: {len(accept_lengths_cpu)})")
+            return input_ids    
         else:
-            return input_ids, new_token, idx
+            import numpy as np
+            # Convert tensors to CPU and extract scalar values if needed
+            accept_lengths_cpu = [x.item() if isinstance(x, torch.Tensor) else x for x in accept_lengths]
+            avg_accept_length = np.mean(accept_lengths_cpu) if accept_lengths_cpu else 0.0
+            print(f"Average accept length: {avg_accept_length:.2f} (total steps: {len(accept_lengths_cpu)})")
+            return input_ids, new_token, idx, avg_accept_length
 
     @torch.no_grad()
     def naivegenerate(
