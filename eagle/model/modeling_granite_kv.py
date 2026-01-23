@@ -762,16 +762,13 @@ class GraniteMoeModel(GraniteMoePreTrainedModel):
 
         # decoder layers
         # [MODIFIED] Always collect hidden states for EAGLE compatibility
-        all_hidden_states = ()
+        # Store embedding layer hidden state (index 0) for EAGLE training compatibility
+        all_hidden_states = (hidden_states,)  # Start with embedding layer output
         all_self_attns = () if output_attentions else None
         all_router_logits = () if output_router_logits else None
         next_decoder_cache = () if use_cache else None
 
         for idx, decoder_layer in enumerate(self.layers):
-            # [MODIFIED] Store hidden states at specific layers for EAGLE
-            if idx == len(self.layers) - 3 or idx == len(self.layers) // 2 or idx == 2:
-                all_hidden_states += (hidden_states,)
-
             past_key_value = (
                 past_key_values[idx] if past_key_values is not None else None
             )
@@ -803,6 +800,13 @@ class GraniteMoeModel(GraniteMoePreTrainedModel):
                 )
 
             hidden_states = layer_outputs[0]
+
+            # [MODIFIED] Store hidden states at specific layers for EAGLE
+            # Training uses: hidden_states[0] (embedding), hidden_states[12], hidden_states[23]
+            # In transformers: hidden_states[0]=embedding, hidden_states[1]=layer[0], hidden_states[12]=layer[11], hidden_states[23]=layer[22]
+            # So we need to store: embedding (already stored), layer 11 output (idx=11), layer 22 output (idx=22)
+            if idx == 11 or idx == 22:
+                all_hidden_states += (hidden_states,)
 
             if use_cache:
                 next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
